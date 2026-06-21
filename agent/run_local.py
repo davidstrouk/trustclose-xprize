@@ -12,7 +12,14 @@ import json
 
 import uvicorn
 
-from main import app, get_evidence_provider, get_generate, get_logger
+from main import (
+    app,
+    get_checkout_link,
+    get_evidence_provider,
+    get_generate,
+    get_logger,
+    get_reserve,
+)
 
 EVIDENCE = {
     "acme": (
@@ -76,9 +83,32 @@ def local_log_sink():
     return log
 
 
+# In-memory billing state so the local demo shows the free-first -> 402 flow with no GCP/Stripe.
+_LOCAL_USAGE = {}
+
+
+def local_reserve():
+    from billing.entitlement import FREE_LIMIT
+
+    def reserve(customer_id):
+        used = _LOCAL_USAGE.get(customer_id, 0)
+        if used >= FREE_LIMIT:
+            return {"allowed": False, "is_paid": False}
+        _LOCAL_USAGE[customer_id] = used + 1
+        return {"allowed": True, "is_paid": False}
+
+    return reserve
+
+
+def local_checkout_link():
+    return lambda customer_id: f"https://stripe.local/checkout/{customer_id}"
+
+
 app.dependency_overrides[get_generate] = lambda: local_generate
 app.dependency_overrides[get_evidence_provider] = local_evidence_provider
 app.dependency_overrides[get_logger] = local_log_sink
+app.dependency_overrides[get_reserve] = local_reserve
+app.dependency_overrides[get_checkout_link] = local_checkout_link
 
 
 if __name__ == "__main__":

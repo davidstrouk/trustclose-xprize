@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 
 from questionnaire.batch import answer_questionnaire
 from questionnaire.xlsx import QuestionnaireParseError, export_xlsx, parse_xlsx
@@ -32,6 +32,30 @@ def get_logger():
     return log_decision
 
 
+def get_reserve():
+    from services.firestore import reserve_questionnaire
+
+    return reserve_questionnaire
+
+
+def get_checkout_link():
+    from services.stripe_billing import create_checkout_url
+
+    return create_checkout_url
+
+
+def get_webhook_parser():
+    from services.stripe_billing import paid_status_from_event
+
+    return paid_status_from_event
+
+
+def get_mark_paid():
+    from services.firestore import mark_paid
+
+    return mark_paid
+
+
 # Synchronous on purpose: FastAPI runs sync path operations in a threadpool, so the blocking
 # openpyxl/Gemini/Firestore/BigQuery calls below don't block the event loop or serialize requests.
 @app.post("/questionnaires/answer")
@@ -41,7 +65,10 @@ def answer_questionnaire_endpoint(
     generate=Depends(get_generate),
     evidence_provider=Depends(get_evidence_provider),
     log_sink=Depends(get_logger),
+    reserve=Depends(get_reserve),
+    checkout_link=Depends(get_checkout_link),
 ):
+    # Validate the upload first so a bad file never consumes a free use.
     file_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Questionnaire file too large (max 10 MB).")
@@ -51,6 +78,18 @@ def answer_questionnaire_endpoint(
         raise HTTPException(
             status_code=400, detail="Upload is not a valid .xlsx questionnaire."
         ) from exc
+
+    # Atomic gate: reserve consumes one free use (or confirms paid) in a single Firestore
+    # transaction, so concurrent requests for the same unpaid customer can't both pass the quota.
+    if not reserve(customer_id)["allowed"]:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message": "Free quota used — subscribe to answer more questionnaires.",
+                "checkout_url": checkout_link(customer_id),
+            },
+        )
+
     evidence_text = evidence_provider(customer_id)
 
     run_id = uuid.uuid4().hex
@@ -71,3 +110,32 @@ def answer_questionnaire_endpoint(
             "Content-Disposition": 'attachment; filename="completed.xlsx"',
         },
     )
+
+
+@app.post("/billing/checkout")
+def billing_checkout(
+    customer_id: str = Form(...),
+    checkout_link=Depends(get_checkout_link),
+):
+    return {"checkout_url": checkout_link(customer_id)}
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(
+    request: Request,
+    parse_event=Depends(get_webhook_parser),
+    mark_paid=Depends(get_mark_paid),
+):
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    try:
+        result = parse_event(payload, signature)
+    except Exception as exc:
+        # construct_event raises on an invalid signature/payload — return 400 so Stripe
+        # stops retrying and the failure is logged as client-side, not a server error.
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
+    if result:
+        customer_id, is_paid = result
+        if customer_id:
+            mark_paid(customer_id, is_paid)
+    return {"received": True}
