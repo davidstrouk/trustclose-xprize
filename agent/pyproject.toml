@@ -1,0 +1,27 @@
+[project]
+name = "trustclose-agent"
+version = "0.1.0"
+description = "TrustClose answering agent — Gemini answer-or-defer pipeline for security questionnaires"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai",           # Vertex AI / Gemini
+    "google-cloud-documentai", # PDF questionnaire parsing
+    "google-cloud-firestore",  # evidence + app state
+    "google-cloud-bigquery",   # agent-decision evidence log
+    "openpyxl",                # XLSX questionnaire parsing
+    "fastapi",
+    "uvicorn",
+    "stripe",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Treat warnings as errors (pristine output), except a known third-party deprecation
+# from Starlette's TestClient. Last matching filter wins, so this exemption overrides "error".
+filterwarnings = [
+    "error",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
