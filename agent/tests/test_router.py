@@ -201,6 +201,19 @@ def test_webhook_marks_customer_paid_on_subscription_event():
     assert marked == ["cust-paid"]
 
 
+def test_webhook_returns_400_on_invalid_signature():
+    def boom(_payload, _sig):
+        raise ValueError("invalid signature")
+
+    app.dependency_overrides[get_webhook_parser] = lambda: boom
+    app.dependency_overrides[get_mark_paid] = lambda: (lambda _c: None)
+    try:
+        resp = TestClient(app).post("/stripe/webhook", content=b"{}", headers={"stripe-signature": "x"})
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 400
+
+
 def test_webhook_ignores_unrelated_events():
     marked = []
     app.dependency_overrides[get_webhook_parser] = lambda: (lambda _payload, _sig: None)

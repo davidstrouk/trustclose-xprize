@@ -76,6 +76,10 @@ def answer_questionnaire_endpoint(
     record_usage=Depends(get_usage_recorder),
     checkout_link=Depends(get_checkout_link),
 ):
+    # NOTE: the read here and the record_usage() increment below are not atomic, so concurrent
+    # requests for the same unpaid customer can both pass the gate (bounded: free limit is small).
+    # The authoritative fix is a Firestore transaction (atomic check-and-increment), landing with
+    # the live-billing wiring where it can be integration-tested against real Firestore.
     account = account_provider(customer_id)
     if requires_payment(account["questionnaires_used"], account["is_paid"]):
         raise HTTPException(
@@ -134,7 +138,12 @@ async def stripe_webhook(
 ):
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
-    customer_id = parse_event(payload, signature)
+    try:
+        customer_id = parse_event(payload, signature)
+    except Exception as exc:
+        # construct_event raises on an invalid signature/payload — return 400 so Stripe
+        # stops retrying and the failure is logged as client-side, not a server error.
+        raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
     if customer_id:
         mark_paid(customer_id)
     return {"received": True}
