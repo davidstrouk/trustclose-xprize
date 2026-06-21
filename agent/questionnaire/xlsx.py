@@ -3,13 +3,22 @@ import io
 import openpyxl
 
 
+class QuestionnaireParseError(Exception):
+    """The upload could not be read as an .xlsx questionnaire."""
+
+
 def parse_xlsx(file_bytes, question_col="A", header_rows=0):
     """Extract questions from a column of an .xlsx questionnaire.
 
     Returns [{"row", "question"}] for every non-blank cell below the header rows,
     preserving the original row number so answers can be written back in place.
+    Raises QuestionnaireParseError if the bytes aren't a readable .xlsx workbook.
     """
-    ws = openpyxl.load_workbook(io.BytesIO(file_bytes)).active
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    except Exception as exc:
+        raise QuestionnaireParseError(str(exc)) from exc
+    ws = workbook.active
     out = []
     for cell in ws[question_col]:
         if cell.row <= header_rows:

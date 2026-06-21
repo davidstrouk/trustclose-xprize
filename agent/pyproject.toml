@@ -5,7 +5,6 @@ description = "TrustClose answering agent — Gemini answer-or-defer pipeline fo
 requires-python = ">=3.12"
 dependencies = [
     "google-genai",           # Vertex AI / Gemini
-    "google-cloud-documentai", # PDF questionnaire parsing
     "google-cloud-firestore",  # evidence + app state
     "google-cloud-bigquery",   # agent-decision evidence log
     "openpyxl",                # XLSX questionnaire parsing

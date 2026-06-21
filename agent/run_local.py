@@ -25,7 +25,9 @@ EVIDENCE = {
 
 def local_generate(prompt: str) -> str:
     question = prompt.rsplit("QUESTION:", 1)[-1].lower()
-    evidence = prompt.lower()
+    # Scan only the evidence section (before "QUESTION:"), not the question itself —
+    # otherwise a keyword in the question alone would falsely satisfy the grounding check.
+    evidence = prompt.rsplit("QUESTION:", 1)[0].lower()
 
     if "encrypt" in question and "aes-256" in evidence:
         return json.dumps(

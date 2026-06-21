@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 
 from questionnaire.batch import answer_questionnaire
-from questionnaire.xlsx import export_xlsx, parse_xlsx
+from questionnaire.xlsx import QuestionnaireParseError, export_xlsx, parse_xlsx
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — openpyxl loads the whole workbook, so cap the upload
@@ -32,21 +32,25 @@ def get_logger():
     return log_decision
 
 
+# Synchronous on purpose: FastAPI runs sync path operations in a threadpool, so the blocking
+# openpyxl/Gemini/Firestore/BigQuery calls below don't block the event loop or serialize requests.
 @app.post("/questionnaires/answer")
-async def answer_questionnaire_endpoint(
+def answer_questionnaire_endpoint(
     customer_id: str = Form(...),
     file: UploadFile = File(...),
     generate=Depends(get_generate),
     evidence_provider=Depends(get_evidence_provider),
     log_sink=Depends(get_logger),
 ):
-    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    file_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Questionnaire file too large (max 10 MB).")
     try:
         questions = parse_xlsx(file_bytes)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Upload is not a valid .xlsx questionnaire.")
+    except QuestionnaireParseError as exc:
+        raise HTTPException(
+            status_code=400, detail="Upload is not a valid .xlsx questionnaire."
+        ) from exc
     evidence_text = evidence_provider(customer_id)
 
     run_id = uuid.uuid4().hex

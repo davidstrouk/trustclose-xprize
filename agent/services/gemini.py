@@ -23,6 +23,7 @@ def _get_client():
             vertexai=True,
             project=os.environ["GCP_PROJECT_ID"],
             location=os.environ.get("VERTEX_LOCATION", "us-central1"),
+            http_options=types.HttpOptions(timeout=120_000),  # 120s, in milliseconds
         )
     return _client
 

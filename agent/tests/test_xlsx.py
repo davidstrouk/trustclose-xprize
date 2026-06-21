@@ -8,10 +8,11 @@ import io
 import json
 
 import openpyxl
+import pytest
 
 from questionnaire.batch import answer_questionnaire
 from questionnaire.decision import NEEDS_INPUT
-from questionnaire.xlsx import parse_xlsx, export_xlsx
+from questionnaire.xlsx import QuestionnaireParseError, parse_xlsx, export_xlsx
 
 
 def _build_xlsx(column_a):
@@ -44,6 +45,11 @@ def test_parse_skips_blank_cells():
 def test_parse_skips_header_rows():
     book = _build_xlsx(["Question", "Do you have MFA?"])
     assert parse_xlsx(book, header_rows=1) == [{"row": 2, "question": "Do you have MFA?"}]
+
+
+def test_parse_raises_on_non_xlsx_bytes():
+    with pytest.raises(QuestionnaireParseError):
+        parse_xlsx(b"this is not a spreadsheet")
 
 
 def test_round_trip_writes_answers_next_to_their_questions():

@@ -17,7 +17,12 @@ def answer_questionnaire(questions, evidence_text, generate, log=None):
         if record["action"] == ANSWER:
             answered += 1
         if log is not None:
-            log(record)
+            try:
+                log(record)
+            except Exception:
+                # The audit log is best-effort: a sink failure (e.g. BigQuery) must not
+                # abort answering the customer's questionnaire.
+                pass
         results.append(record)
     total = len(results)
     return {"results": results, "total": total, "answered": answered, "deferred": total - answered}

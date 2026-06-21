@@ -25,4 +25,7 @@ def _table():
 
 
 def log_decision(record):
-    _client().insert_rows_json(_table(), [record])
+    # insert_rows_json returns a list of per-row errors (not an exception); empty == success.
+    errors = _client().insert_rows_json(_table(), [record])
+    if errors:
+        raise RuntimeError(f"BigQuery insert failed: {errors}")

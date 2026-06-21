@@ -127,6 +127,19 @@ def test_a_throwing_generator_defers_that_question_without_killing_the_run():
     assert boom["answer"] == NEEDS_INPUT
 
 
+def test_a_throwing_log_sink_does_not_abort_the_run():
+    questions = [{"row": 1, "question": "Do you encrypt data at rest?"}]
+    generate = _generator_for(
+        {"encrypt": {"can_answer": True, "confidence": 0.95, "answer": "Yes", "citation": "SOC2"}}
+    )
+
+    def bad_log(_record):
+        raise RuntimeError("BigQuery down")
+
+    run = answer_questionnaire(questions, "<evidence>", generate, log=bad_log)
+    assert run["answered"] == 1  # the run completes despite the audit-log failure
+
+
 def test_empty_questionnaire_returns_a_zeroed_run():
     logged = []
     run = answer_questionnaire([], "<evidence>", lambda _p: "{}", log=logged.append)
