@@ -35,3 +35,21 @@ def all_evidence_text(customer_id):
         _client().collection("customers").document(customer_id).collection("evidence").stream()
     )
     return "\n\n".join(d.to_dict().get("text", "") for d in docs)
+
+
+def get_account(customer_id):
+    data = _client().collection("customers").document(customer_id).get().to_dict() or {}
+    return {
+        "questionnaires_used": int(data.get("questionnaires_used", 0)),
+        "is_paid": bool(data.get("is_paid", False)),
+    }
+
+
+def record_usage(customer_id):
+    _client().collection("customers").document(customer_id).set(
+        {"questionnaires_used": firestore.Increment(1)}, merge=True
+    )
+
+
+def mark_paid(customer_id, is_paid=True):
+    _client().collection("customers").document(customer_id).set({"is_paid": is_paid}, merge=True)
