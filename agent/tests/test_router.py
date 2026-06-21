@@ -88,3 +88,22 @@ def test_endpoint_returns_completed_xlsx_with_counts_and_logs_decisions():
     assert ws["B1"].value == "Yes, AES-256"
     assert ws["B2"].value == "NEEDS YOUR INPUT"  # deferred row flagged for a human
     assert len(logged) == 2  # full evidence trail captured
+
+
+def test_logged_records_are_enriched_for_bigquery():
+    logged = []
+    app.dependency_overrides[get_generate] = lambda: (
+        lambda _p: json.dumps({"can_answer": False, "confidence": 0.0})
+    )
+    app.dependency_overrides[get_evidence_provider] = lambda: (lambda _cid: "<evidence>")
+    app.dependency_overrides[get_logger] = lambda: logged.append
+    try:
+        client = TestClient(app)
+        _post(client, _xlsx(["Do you have MFA?", "Do you log access?"]), customer_id="acme-9")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert all(r["customer_id"] == "acme-9" for r in logged)   # tagged to the customer
+    assert all(r.get("run_id") for r in logged)                # every row carries a run id
+    assert len({r["run_id"] for r in logged}) == 1             # one run id for the whole batch
+    assert all(r.get("created_at") for r in logged)            # timestamped

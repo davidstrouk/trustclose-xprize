@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime, timezone
+
 from fastapi import Depends, FastAPI, File, Form, Response, UploadFile
 
 from questionnaire.batch import answer_questionnaire
@@ -34,11 +37,18 @@ async def answer_questionnaire_endpoint(
     file: UploadFile = File(...),
     generate=Depends(get_generate),
     evidence_provider=Depends(get_evidence_provider),
-    log=Depends(get_logger),
+    log_sink=Depends(get_logger),
 ):
     file_bytes = await file.read()
     questions = parse_xlsx(file_bytes)
     evidence_text = evidence_provider(customer_id)
+
+    run_id = uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    def log(record):
+        log_sink({**record, "run_id": run_id, "customer_id": customer_id, "created_at": created_at})
+
     run = answer_questionnaire(questions, evidence_text, generate, log=log)
     completed = export_xlsx(file_bytes, run["results"])
     return Response(
