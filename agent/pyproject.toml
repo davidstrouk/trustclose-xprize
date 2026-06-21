@@ -1,0 +1,27 @@
+[project]
+name = "trustclose-agent"
+version = "0.1.0"
+description = "TrustClose answering agent — Gemini answer-or-defer pipeline for security questionnaires"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai",           # Vertex AI / Gemini
+    "google-cloud-firestore",  # evidence + app state
+    "google-cloud-bigquery",   # agent-decision evidence log
+    "openpyxl",                # XLSX questionnaire parsing
+    "fastapi",
+    "uvicorn",
+    "stripe",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Treat warnings as errors (pristine output), except Starlette's TestClient httpx deprecation.
+# Matched by exact class, not message text, so it survives Starlette version/message changes.
+# Last matching filter wins, so this exemption overrides "error".
+filterwarnings = [
+    "error",
+    "ignore::starlette.exceptions.StarletteDeprecationWarning",
+]

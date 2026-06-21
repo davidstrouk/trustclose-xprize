@@ -1,0 +1,140 @@
+"""TDD for the FastAPI router.
+
+Uses TestClient + FastAPI dependency-override so the full HTTP path
+(upload -> parse -> answer -> export) is exercised with fakes injected only at the
+I/O boundary (Gemini, the evidence source, the log sink). No SDK, no network.
+"""
+
+import io
+import json
+
+import openpyxl
+from fastapi.testclient import TestClient
+
+import main
+from main import app, get_generate, get_evidence_provider, get_logger
+
+
+def _stub_providers():
+    app.dependency_overrides[get_generate] = lambda: (lambda _p: "{}")
+    app.dependency_overrides[get_evidence_provider] = lambda: (lambda _c: "")
+    app.dependency_overrides[get_logger] = lambda: (lambda _r: None)
+
+
+def _xlsx(questions):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for i, q in enumerate(questions, start=1):
+        ws[f"A{i}"] = q
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _post(client, book, customer_id="acme"):
+    return client.post(
+        "/questionnaires/answer",
+        data={"customer_id": customer_id},
+        files={
+            "file": (
+                "q.xlsx",
+                book,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+
+def test_endpoint_passes_customer_id_to_evidence_provider():
+    seen = {}
+
+    def evidence(customer_id):
+        seen["customer_id"] = customer_id
+        return "evidence"
+
+    app.dependency_overrides[get_generate] = lambda: (
+        lambda _p: json.dumps({"can_answer": False, "confidence": 0.0})
+    )
+    app.dependency_overrides[get_evidence_provider] = lambda: evidence
+    app.dependency_overrides[get_logger] = lambda: (lambda _record: None)
+    try:
+        client = TestClient(app)
+        resp = _post(client, _xlsx(["Do you have MFA?"]), customer_id="acme-42")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert seen["customer_id"] == "acme-42"
+
+
+def test_endpoint_returns_completed_xlsx_with_counts_and_logs_decisions():
+    logged = []
+
+    def fake_generate(prompt):
+        if "encrypt" in prompt:
+            return json.dumps(
+                {"can_answer": True, "confidence": 0.95, "answer": "Yes, AES-256", "citation": "SOC2"}
+            )
+        return json.dumps({"can_answer": False, "confidence": 0.1})
+
+    app.dependency_overrides[get_generate] = lambda: fake_generate
+    app.dependency_overrides[get_evidence_provider] = lambda: (lambda _cid: "<evidence>")
+    app.dependency_overrides[get_logger] = lambda: logged.append
+    try:
+        client = TestClient(app)
+        resp = _post(client, _xlsx(["Do you encrypt data at rest?", "Do you do annual pentests?"]))
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert resp.headers["x-total"] == "2"
+    assert resp.headers["x-answered"] == "1"
+    assert resp.headers["x-deferred"] == "1"
+
+    ws = openpyxl.load_workbook(io.BytesIO(resp.content)).active
+    assert ws["B1"].value == "Yes, AES-256"
+    assert ws["B2"].value == "NEEDS YOUR INPUT"  # deferred row flagged for a human
+    assert len(logged) == 2  # full evidence trail captured
+
+
+def test_logged_records_are_enriched_for_bigquery():
+    logged = []
+    app.dependency_overrides[get_generate] = lambda: (
+        lambda _p: json.dumps({"can_answer": False, "confidence": 0.0})
+    )
+    app.dependency_overrides[get_evidence_provider] = lambda: (lambda _cid: "<evidence>")
+    app.dependency_overrides[get_logger] = lambda: logged.append
+    try:
+        client = TestClient(app)
+        _post(client, _xlsx(["Do you have MFA?", "Do you log access?"]), customer_id="acme-9")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert all(r["customer_id"] == "acme-9" for r in logged)   # tagged to the customer
+    assert all(r.get("run_id") for r in logged)                # every row carries a run id
+    assert len({r["run_id"] for r in logged}) == 1             # one run id for the whole batch
+    assert all(r.get("created_at") for r in logged)            # timestamped
+
+
+def test_rejects_oversized_upload(monkeypatch):
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 100, raising=False)
+    _stub_providers()
+    try:
+        resp = _post(TestClient(app), _xlsx(["Do you have MFA?"]))  # a real .xlsx is > 100 bytes
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 413
+
+
+def test_rejects_non_xlsx_upload():
+    _stub_providers()
+    try:
+        resp = TestClient(app).post(
+            "/questionnaires/answer",
+            data={"customer_id": "acme"},
+            files={"file": ("q.xlsx", b"this is not a spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 400
