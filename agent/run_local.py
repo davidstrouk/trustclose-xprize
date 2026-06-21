@@ -14,12 +14,11 @@ import uvicorn
 
 from main import (
     app,
-    get_account,
     get_checkout_link,
     get_evidence_provider,
     get_generate,
     get_logger,
-    get_usage_recorder,
+    get_reserve,
 )
 
 EVIDENCE = {
@@ -88,18 +87,17 @@ def local_log_sink():
 _LOCAL_USAGE = {}
 
 
-def local_account_provider():
-    return lambda customer_id: {
-        "questionnaires_used": _LOCAL_USAGE.get(customer_id, 0),
-        "is_paid": False,
-    }
+def local_reserve():
+    from billing.entitlement import FREE_LIMIT
 
+    def reserve(customer_id):
+        used = _LOCAL_USAGE.get(customer_id, 0)
+        if used >= FREE_LIMIT:
+            return {"allowed": False, "is_paid": False}
+        _LOCAL_USAGE[customer_id] = used + 1
+        return {"allowed": True, "is_paid": False}
 
-def local_usage_recorder():
-    def record(customer_id):
-        _LOCAL_USAGE[customer_id] = _LOCAL_USAGE.get(customer_id, 0) + 1
-
-    return record
+    return reserve
 
 
 def local_checkout_link():
@@ -109,8 +107,7 @@ def local_checkout_link():
 app.dependency_overrides[get_generate] = lambda: local_generate
 app.dependency_overrides[get_evidence_provider] = local_evidence_provider
 app.dependency_overrides[get_logger] = local_log_sink
-app.dependency_overrides[get_account] = local_account_provider
-app.dependency_overrides[get_usage_recorder] = local_usage_recorder
+app.dependency_overrides[get_reserve] = local_reserve
 app.dependency_overrides[get_checkout_link] = local_checkout_link
 
 

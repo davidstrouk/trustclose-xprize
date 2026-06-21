@@ -1,8 +1,8 @@
 """TDD for the FastAPI router.
 
 Uses TestClient + FastAPI dependency-override so the full HTTP path
-(billing gate -> parse -> answer -> export) is exercised with fakes injected only
-at the I/O boundary (Gemini, evidence, log, account, usage, checkout). No SDK, no network.
+(validate -> reserve gate -> answer -> export) is exercised with fakes injected only
+at the I/O boundary (Gemini, evidence, log, reserve, checkout, webhook). No SDK, no network.
 """
 
 import io
@@ -14,26 +14,22 @@ from fastapi.testclient import TestClient
 import main
 from main import (
     app,
-    get_account,
     get_checkout_link,
     get_evidence_provider,
     get_generate,
     get_logger,
     get_mark_paid,
-    get_usage_recorder,
+    get_reserve,
     get_webhook_parser,
 )
 
 
 def _stub_providers():
-    """Safe defaults for every injected dependency; an entitled (free, unused) account."""
+    """Safe defaults for every injected dependency; reserve allows (entitled, unpaid)."""
     app.dependency_overrides[get_generate] = lambda: (lambda _p: "{}")
     app.dependency_overrides[get_evidence_provider] = lambda: (lambda _c: "")
     app.dependency_overrides[get_logger] = lambda: (lambda _r: None)
-    app.dependency_overrides[get_account] = lambda: (
-        lambda _c: {"questionnaires_used": 0, "is_paid": False}
-    )
-    app.dependency_overrides[get_usage_recorder] = lambda: (lambda _c: None)
+    app.dependency_overrides[get_reserve] = lambda: (lambda _c: {"allowed": True, "is_paid": False})
     app.dependency_overrides[get_checkout_link] = lambda: (lambda _c: "https://stripe.test/checkout")
 
 
@@ -128,11 +124,9 @@ def test_logged_records_are_enriched_for_bigquery():
     assert all(r.get("created_at") for r in logged)
 
 
-def test_unpaid_customer_over_quota_is_blocked_with_checkout_link():
+def test_blocked_reservation_returns_402_with_checkout_link():
     _stub_providers()
-    app.dependency_overrides[get_account] = lambda: (
-        lambda _c: {"questionnaires_used": 1, "is_paid": False}
-    )
+    app.dependency_overrides[get_reserve] = lambda: (lambda _c: {"allowed": False, "is_paid": False})
     app.dependency_overrides[get_checkout_link] = lambda: (lambda _c: "https://stripe.test/checkout/abc")
     try:
         resp = _post(TestClient(app), _xlsx(["Do you have MFA?"]))
@@ -143,40 +137,35 @@ def test_unpaid_customer_over_quota_is_blocked_with_checkout_link():
     assert resp.json()["detail"]["checkout_url"] == "https://stripe.test/checkout/abc"
 
 
-def test_paid_customer_over_quota_is_answered():
+def test_allowed_reservation_is_answered():
     _stub_providers()
-    app.dependency_overrides[get_account] = lambda: (
-        lambda _c: {"questionnaires_used": 99, "is_paid": True}
-    )
+    app.dependency_overrides[get_reserve] = lambda: (lambda _c: {"allowed": True, "is_paid": True})
     try:
         resp = _post(TestClient(app), _xlsx(["Do you have MFA?"]))
     finally:
         app.dependency_overrides.clear()
-
     assert resp.status_code == 200
 
 
-def test_usage_recorded_after_answering_but_not_when_blocked():
-    answered = []
-    _stub_providers()
-    app.dependency_overrides[get_usage_recorder] = lambda: answered.append
-    try:
-        _post(TestClient(app), _xlsx(["Do you have MFA?"]), customer_id="cust-A")
-    finally:
-        app.dependency_overrides.clear()
-    assert answered == ["cust-A"]
+def test_reserve_consulted_and_blocked_request_is_not_answered():
+    calls, generated = [], []
 
-    blocked = []
+    def reserve(customer_id):
+        calls.append(customer_id)
+        return {"allowed": False, "is_paid": False}
+
     _stub_providers()
-    app.dependency_overrides[get_account] = lambda: (
-        lambda _c: {"questionnaires_used": 1, "is_paid": False}
-    )
-    app.dependency_overrides[get_usage_recorder] = lambda: blocked.append
+    app.dependency_overrides[get_reserve] = lambda: reserve
+    app.dependency_overrides[get_generate] = lambda: (lambda _p: generated.append(1) or "{}")
+    app.dependency_overrides[get_checkout_link] = lambda: (lambda _c: "https://x")
     try:
-        _post(TestClient(app), _xlsx(["Do you have MFA?"]), customer_id="cust-B")
+        resp = _post(TestClient(app), _xlsx(["Do you have MFA?"]), customer_id="cust-Z")
     finally:
         app.dependency_overrides.clear()
-    assert blocked == []  # a blocked (402) request must not consume usage
+
+    assert resp.status_code == 402
+    assert calls == ["cust-Z"]
+    assert generated == []  # blocked -> Gemini is never called
 
 
 def test_checkout_returns_a_subscription_url():
@@ -189,16 +178,28 @@ def test_checkout_returns_a_subscription_url():
     assert resp.json()["checkout_url"] == "https://stripe.test/acme"
 
 
-def test_webhook_marks_customer_paid_on_subscription_event():
+def test_webhook_grants_paid_on_subscription_event():
     marked = []
-    app.dependency_overrides[get_webhook_parser] = lambda: (lambda _payload, _sig: "cust-paid")
-    app.dependency_overrides[get_mark_paid] = lambda: marked.append
+    app.dependency_overrides[get_webhook_parser] = lambda: (lambda _p, _s: ("cust-1", True))
+    app.dependency_overrides[get_mark_paid] = lambda: (lambda c, paid: marked.append((c, paid)))
     try:
         resp = TestClient(app).post("/stripe/webhook", content=b"{}", headers={"stripe-signature": "x"})
     finally:
         app.dependency_overrides.clear()
     assert resp.status_code == 200
-    assert marked == ["cust-paid"]
+    assert marked == [("cust-1", True)]
+
+
+def test_webhook_revokes_paid_on_cancellation():
+    marked = []
+    app.dependency_overrides[get_webhook_parser] = lambda: (lambda _p, _s: ("cust-1", False))
+    app.dependency_overrides[get_mark_paid] = lambda: (lambda c, paid: marked.append((c, paid)))
+    try:
+        resp = TestClient(app).post("/stripe/webhook", content=b"{}", headers={"stripe-signature": "x"})
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert marked == [("cust-1", False)]  # canceled subscriber loses access
 
 
 def test_webhook_returns_400_on_invalid_signature():
@@ -206,7 +207,7 @@ def test_webhook_returns_400_on_invalid_signature():
         raise ValueError("invalid signature")
 
     app.dependency_overrides[get_webhook_parser] = lambda: boom
-    app.dependency_overrides[get_mark_paid] = lambda: (lambda _c: None)
+    app.dependency_overrides[get_mark_paid] = lambda: (lambda *_a: None)
     try:
         resp = TestClient(app).post("/stripe/webhook", content=b"{}", headers={"stripe-signature": "x"})
     finally:
@@ -216,8 +217,8 @@ def test_webhook_returns_400_on_invalid_signature():
 
 def test_webhook_ignores_unrelated_events():
     marked = []
-    app.dependency_overrides[get_webhook_parser] = lambda: (lambda _payload, _sig: None)
-    app.dependency_overrides[get_mark_paid] = lambda: marked.append
+    app.dependency_overrides[get_webhook_parser] = lambda: (lambda _p, _s: None)
+    app.dependency_overrides[get_mark_paid] = lambda: (lambda *_a: marked.append(_a))
     try:
         resp = TestClient(app).post("/stripe/webhook", content=b"{}", headers={"stripe-signature": "x"})
     finally:

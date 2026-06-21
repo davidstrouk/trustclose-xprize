@@ -1,8 +1,8 @@
 """Thin Stripe adapter — untested I/O boundary (needs STRIPE_SECRET_KEY).
 
 `create_checkout_url` opens a subscription Checkout session and returns its URL;
-`paid_customer_from_event` verifies a webhook and returns the customer_id that just
-subscribed (or None). No business logic lives here.
+`paid_status_from_event` verifies a webhook and returns (customer_id, is_paid) for the
+events that grant or revoke access (or None to ignore). No business logic lives here.
 """
 
 import os
@@ -23,15 +23,23 @@ def create_checkout_url(customer_id):
         cancel_url=os.environ.get("BILLING_CANCEL_URL", "https://trustclose.app/billing/cancel"),
         client_reference_id=customer_id,
         metadata={"customer_id": customer_id},
+        # Tag the subscription too, so later subscription.* events carry our customer id.
+        subscription_data={"metadata": {"customer_id": customer_id}},
     )
     return session.url
 
 
-def paid_customer_from_event(payload, signature):
+def paid_status_from_event(payload, signature):
+    """Return (customer_id, is_paid) for a grant/revoke event, or None to ignore."""
     _api_key()
     event = stripe.Webhook.construct_event(
         payload, signature, os.environ["STRIPE_WEBHOOK_SECRET"]
     )
-    if event["type"] == "checkout.session.completed":
-        return event["data"]["object"].get("client_reference_id")
+    event_type = event["type"]
+    obj = event["data"]["object"]
+    if event_type == "checkout.session.completed":
+        return (obj.get("client_reference_id"), True)
+    if event_type == "customer.subscription.deleted":
+        customer_id = (obj.get("metadata") or {}).get("customer_id")
+        return (customer_id, False) if customer_id else None
     return None

@@ -3,7 +3,6 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 
-from billing.entitlement import requires_payment
 from questionnaire.batch import answer_questionnaire
 from questionnaire.xlsx import QuestionnaireParseError, export_xlsx, parse_xlsx
 
@@ -33,16 +32,10 @@ def get_logger():
     return log_decision
 
 
-def get_account():
-    from services.firestore import get_account as _get_account
+def get_reserve():
+    from services.firestore import reserve_questionnaire
 
-    return _get_account
-
-
-def get_usage_recorder():
-    from services.firestore import record_usage
-
-    return record_usage
+    return reserve_questionnaire
 
 
 def get_checkout_link():
@@ -52,9 +45,9 @@ def get_checkout_link():
 
 
 def get_webhook_parser():
-    from services.stripe_billing import paid_customer_from_event
+    from services.stripe_billing import paid_status_from_event
 
-    return paid_customer_from_event
+    return paid_status_from_event
 
 
 def get_mark_paid():
@@ -72,24 +65,10 @@ def answer_questionnaire_endpoint(
     generate=Depends(get_generate),
     evidence_provider=Depends(get_evidence_provider),
     log_sink=Depends(get_logger),
-    account_provider=Depends(get_account),
-    record_usage=Depends(get_usage_recorder),
+    reserve=Depends(get_reserve),
     checkout_link=Depends(get_checkout_link),
 ):
-    # NOTE: the read here and the record_usage() increment below are not atomic, so concurrent
-    # requests for the same unpaid customer can both pass the gate (bounded: free limit is small).
-    # The authoritative fix is a Firestore transaction (atomic check-and-increment), landing with
-    # the live-billing wiring where it can be integration-tested against real Firestore.
-    account = account_provider(customer_id)
-    if requires_payment(account["questionnaires_used"], account["is_paid"]):
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "message": "Free quota used — subscribe to answer more questionnaires.",
-                "checkout_url": checkout_link(customer_id),
-            },
-        )
-
+    # Validate the upload first so a bad file never consumes a free use.
     file_bytes = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Questionnaire file too large (max 10 MB).")
@@ -99,6 +78,18 @@ def answer_questionnaire_endpoint(
         raise HTTPException(
             status_code=400, detail="Upload is not a valid .xlsx questionnaire."
         ) from exc
+
+    # Atomic gate: reserve consumes one free use (or confirms paid) in a single Firestore
+    # transaction, so concurrent requests for the same unpaid customer can't both pass the quota.
+    if not reserve(customer_id)["allowed"]:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message": "Free quota used — subscribe to answer more questionnaires.",
+                "checkout_url": checkout_link(customer_id),
+            },
+        )
+
     evidence_text = evidence_provider(customer_id)
 
     run_id = uuid.uuid4().hex
@@ -109,7 +100,6 @@ def answer_questionnaire_endpoint(
 
     run = answer_questionnaire(questions, evidence_text, generate, log=log)
     completed = export_xlsx(file_bytes, run["results"])
-    record_usage(customer_id)
     return Response(
         content=completed,
         media_type=XLSX_MEDIA_TYPE,
@@ -139,11 +129,13 @@ async def stripe_webhook(
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
     try:
-        customer_id = parse_event(payload, signature)
+        result = parse_event(payload, signature)
     except Exception as exc:
         # construct_event raises on an invalid signature/payload — return 400 so Stripe
         # stops retrying and the failure is logged as client-side, not a server error.
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook.") from exc
-    if customer_id:
-        mark_paid(customer_id)
+    if result:
+        customer_id, is_paid = result
+        if customer_id:
+            mark_paid(customer_id, is_paid)
     return {"received": True}

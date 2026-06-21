@@ -37,18 +37,30 @@ def all_evidence_text(customer_id):
     return "\n\n".join(d.to_dict().get("text", "") for d in docs)
 
 
-def get_account(customer_id):
-    data = _client().collection("customers").document(customer_id).get().to_dict() or {}
-    return {
-        "questionnaires_used": int(data.get("questionnaires_used", 0)),
-        "is_paid": bool(data.get("is_paid", False)),
-    }
+def reserve_questionnaire(customer_id, free_limit=None):
+    """Atomically check entitlement and consume one free use if allowed.
 
+    Runs in a Firestore transaction so two concurrent requests for the same unpaid
+    customer cannot both pass the free-quota gate. Returns {"allowed", "is_paid"}.
+    """
+    from billing.entitlement import FREE_LIMIT, requires_payment
 
-def record_usage(customer_id):
-    _client().collection("customers").document(customer_id).set(
-        {"questionnaires_used": firestore.Increment(1)}, merge=True
-    )
+    limit = FREE_LIMIT if free_limit is None else free_limit
+    db = _client()
+    ref = db.collection("customers").document(customer_id)
+
+    @firestore.transactional
+    def _reserve(transaction):
+        data = ref.get(transaction=transaction).to_dict() or {}
+        used = int(data.get("questionnaires_used", 0))
+        is_paid = bool(data.get("is_paid", False))
+        if requires_payment(used, is_paid, limit):
+            return {"allowed": False, "is_paid": is_paid}
+        if not is_paid:
+            transaction.set(ref, {"questionnaires_used": used + 1}, merge=True)
+        return {"allowed": True, "is_paid": is_paid}
+
+    return _reserve(db.transaction())
 
 
 def mark_paid(customer_id, is_paid=True):
