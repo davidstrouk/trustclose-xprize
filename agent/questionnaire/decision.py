@@ -1,3 +1,5 @@
+import math
+
 ANSWER = "answer"
 DEFER = "defer"
 NEEDS_INPUT = "NEEDS YOUR INPUT"
@@ -17,7 +19,13 @@ def decide_action(can_answer, confidence, threshold=DEFAULT_THRESHOLD):
 
 def _is_real_number(value):
     # bool is a subclass of int in Python; exclude it so True/False can't pass as confidence.
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    # Reject NaN/Infinity too: json.loads accepts them and `nan < threshold` is False,
+    # which would otherwise let a non-finite confidence slip through as an ANSWER.
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _is_nonempty_text(value):
+    return isinstance(value, str) and bool(value.strip())
 
 
 def evaluate_answer(model_response, threshold=DEFAULT_THRESHOLD):
@@ -29,8 +37,14 @@ def evaluate_answer(model_response, threshold=DEFAULT_THRESHOLD):
     """
     can_answer = model_response.get("can_answer")
     confidence = model_response.get("confidence")
+    answer = model_response.get("answer")
+    citation = model_response.get("citation")
 
-    if not isinstance(can_answer, bool) or not _is_real_number(confidence):
+    # A grounded answer needs both non-empty answer text and a citation; without either,
+    # an "ANSWER" would export an empty or uncited cell, so degrade to DEFER.
+    grounded = _is_nonempty_text(answer) and _is_nonempty_text(citation)
+
+    if not isinstance(can_answer, bool) or not _is_real_number(confidence) or not grounded:
         action = DEFER
     else:
         action = decide_action(can_answer, confidence, threshold)
@@ -38,7 +52,7 @@ def evaluate_answer(model_response, threshold=DEFAULT_THRESHOLD):
     answering = action == ANSWER
     return {
         "action": action,
-        "answer": model_response.get("answer", "") if answering else NEEDS_INPUT,
-        "citation": model_response.get("citation", "") if answering else "",
+        "answer": answer if answering else NEEDS_INPUT,
+        "citation": citation if answering else "",
         "confidence": confidence if _is_real_number(confidence) else 0.0,
     }

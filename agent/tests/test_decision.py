@@ -63,3 +63,23 @@ def test_evaluate_passes_through_a_grounded_answer():
 def test_evaluate_defers_on_malformed_confidence():
     result = evaluate_answer({"can_answer": True, "confidence": "high", "answer": "Yes"})
     assert result["action"] == DEFER
+
+
+def test_evaluate_defers_on_non_finite_confidence():
+    # json.loads accepts NaN/Infinity; NaN < threshold is False and must not slip through as ANSWER.
+    nan = float("nan")
+    result = evaluate_answer({"can_answer": True, "confidence": nan, "answer": "Yes", "citation": "SOC2"})
+    assert result["action"] == DEFER
+
+
+def test_evaluate_defers_when_answer_text_is_missing():
+    # can_answer=True + high confidence but NO answer text would export an empty "answered" cell.
+    result = evaluate_answer({"can_answer": True, "confidence": 0.95, "citation": "SOC2"})
+    assert result["action"] == DEFER
+    assert result["answer"] == NEEDS_INPUT
+
+
+def test_evaluate_defers_when_citation_is_missing():
+    # An answer with no citation isn't grounded — defer rather than present an uncited claim.
+    result = evaluate_answer({"can_answer": True, "confidence": 0.95, "answer": "Yes"})
+    assert result["action"] == DEFER

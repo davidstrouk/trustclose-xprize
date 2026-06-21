@@ -11,7 +11,14 @@ import json
 import openpyxl
 from fastapi.testclient import TestClient
 
+import main
 from main import app, get_generate, get_evidence_provider, get_logger
+
+
+def _stub_providers():
+    app.dependency_overrides[get_generate] = lambda: (lambda _p: "{}")
+    app.dependency_overrides[get_evidence_provider] = lambda: (lambda _c: "")
+    app.dependency_overrides[get_logger] = lambda: (lambda _r: None)
 
 
 def _xlsx(questions):
@@ -107,3 +114,27 @@ def test_logged_records_are_enriched_for_bigquery():
     assert all(r.get("run_id") for r in logged)                # every row carries a run id
     assert len({r["run_id"] for r in logged}) == 1             # one run id for the whole batch
     assert all(r.get("created_at") for r in logged)            # timestamped
+
+
+def test_rejects_oversized_upload(monkeypatch):
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 100, raising=False)
+    _stub_providers()
+    try:
+        resp = _post(TestClient(app), _xlsx(["Do you have MFA?"]))  # a real .xlsx is > 100 bytes
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 413
+
+
+def test_rejects_non_xlsx_upload():
+    _stub_providers()
+    try:
+        resp = TestClient(app).post(
+            "/questionnaires/answer",
+            data={"customer_id": "acme"},
+            files={"file": ("q.xlsx", b"this is not a spreadsheet",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 400

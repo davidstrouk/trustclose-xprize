@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import Depends, FastAPI, File, Form, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Response, UploadFile
 
 from questionnaire.batch import answer_questionnaire
 from questionnaire.xlsx import export_xlsx, parse_xlsx
 
 XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB — openpyxl loads the whole workbook, so cap the upload
 
 app = FastAPI(title="TrustClose")
 
@@ -39,8 +40,13 @@ async def answer_questionnaire_endpoint(
     evidence_provider=Depends(get_evidence_provider),
     log_sink=Depends(get_logger),
 ):
-    file_bytes = await file.read()
-    questions = parse_xlsx(file_bytes)
+    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Questionnaire file too large (max 10 MB).")
+    try:
+        questions = parse_xlsx(file_bytes)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Upload is not a valid .xlsx questionnaire.")
     evidence_text = evidence_provider(customer_id)
 
     run_id = uuid.uuid4().hex
